@@ -1,0 +1,434 @@
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+--Window
+local Window = Rayfield:CreateWindow({
+    Name = "The Hunt 2026",
+    LoadingTitle = "MOUSED hub is loading",
+    LoadingSubtitle = "By Nonfakerr",
+    ConfigurationSaving = {
+        Enabled = false,
+        FolderName = "MOUSEDConfig",
+        FileName = "MOUSEDSetting"
+    }
+})
+
+local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+
+local TWEEN_TIME = 1      -- seconds per part
+local PART_COUNT = 10
+local NAME_FORMAT = "Part%d"
+-- Island 2 settings
+local TWEEN_SPEED = 100   -- studs per second (lower = slower/safer)
+local PROMPT_DELAY = 0.3  -- wait after arriving before firing the prompt
+
+local MainTab = Window:CreateTab("Main", nil)
+local SecretTab = Window:CreateTab("Secret", nil)
+
+MainTab:CreateButton({
+    Name = "Collect All Badges (2006)",
+    Callback = function()
+        local char = Players.LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if not root then
+            Rayfield:Notify({
+                Title = "No character",
+                Content = "HumanoidRootPart not found.",
+                Duration = 4,
+            })
+            return
+        end
+
+        for i = 1, PART_COUNT do
+            local part = workspace:FindFirstChild(string.format(NAME_FORMAT, i))
+            if part and part:IsA("BasePart") then
+                local tween = TweenService:Create(
+                    root,
+                    TweenInfo.new(TWEEN_TIME, Enum.EasingStyle.Linear),
+                    {CFrame = part.CFrame + Vector3.new(0, 3, 0)}
+                )
+                tween:Play()
+                tween.Completed:Wait()
+            else
+                Rayfield:Notify({
+                    Title = "Part missing",
+                    Content = string.format(NAME_FORMAT, i) .. " not found, skipping.",
+                    Duration = 3,
+                })
+            end
+        end
+    end,
+})
+-- Island 2: tween to each position, then fire the closest unused ProximityPrompt
+local ISLAND2_POSITIONS = {
+    Vector3.new(-700.0948486328125, 3.1765737533569336, 451.99053955078125),
+    Vector3.new(-628, -8.0834321975708, 200.50003051757812),
+    Vector3.new(-816.4998779296875, 11.676633834838867, 183.00003051757812),
+    Vector3.new(-697.7421875, 41.076656341552734, 168.52737426757812),
+    Vector3.new(-589, 4.676634311676025, 300.0000305175781),
+}
+-- Finds the ProximityPrompt in Island2.Buttons closest to a position (skips ones already used)
+local function getClosestPrompt(position, used)
+    local buttons = workspace.Gimmicks.Island2.Buttons
+    local best, bestDist
+    for _, obj in ipairs(buttons:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") and not used[obj] then
+            local parent = obj.Parent
+            local promptPos = parent:IsA("Attachment") and parent.WorldPosition or parent:GetPivot().Position
+            local dist = (promptPos - position).Magnitude
+            if not bestDist or dist < bestDist then
+                best, bestDist = obj, dist
+            end
+        end
+    end
+    return best
+end
+
+local island2Running = false
+
+MainTab:CreateButton({
+    Name = "Active All Buttons (2007)",
+    Callback = function()
+        if island2Running then return end
+
+        local char = Players.LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if not root then
+            Rayfield:Notify({
+                Title = "No character",
+                Content = "HumanoidRootPart not found.",
+                Duration = 4,
+            })
+            return
+        end
+
+        island2Running = true
+
+        local ok, err = pcall(function()
+            local used = {}
+            for i, pos in ipairs(ISLAND2_POSITIONS) do
+                -- Tween to this step's position
+                local distance = (root.Position - pos).Magnitude
+                local time = math.max(distance / TWEEN_SPEED, 0.3)
+                local tween = TweenService:Create(
+                    root,
+                    TweenInfo.new(time, Enum.EasingStyle.Linear),
+                    {CFrame = CFrame.new(pos)}
+                )
+                tween:Play()
+                tween.Completed:Wait()
+                task.wait(PROMPT_DELAY)
+
+                -- Fire the closest unused ProximityPrompt
+                local fired, fireErr = pcall(function()
+                    local prompt = getClosestPrompt(pos, used)
+                    assert(prompt, "no ProximityPrompt found near this position")
+                    used[prompt] = true
+                    fireproximityprompt(prompt)
+                end)
+                if not fired then
+                    Rayfield:Notify({
+                        Title = "Prompt " .. i .. " failed",
+                        Content = tostring(fireErr),
+                        Duration = 5,
+                    })
+                end
+            end
+        end)
+
+        island2Running = false
+
+        if not ok then
+            Rayfield:Notify({
+                Title = "Island 2 stopped",
+                Content = tostring(err),
+                Duration = 5,
+            })
+        end
+    end,
+})
+-- Toon Paintball: equip the tool, then tween to Egg1..Egg10 and shoot each one
+local UserInputService = game:GetService("UserInputService")
+
+local PAINTBALL_NAME = "Toon Paintball"
+local EGG_NAME_FORMAT = "Egg%d"
+local EGG_COUNT = 10
+local EGG_STAND_OFFSET = Vector3.new(0, 3, 5) -- where you stand relative to each egg
+local SHOT_COOLDOWN = 3       -- minimum seconds between shots (raise it if shots get ignored)
+local SHOTS_PER_EGG = 1       -- shots fired at each egg
+local SHOOT_DELAY = 0.5       -- seconds to wait after each shot
+local ANCHOR_DURING_EGGS = true -- holds you still so you can't fall while shooting
+-- Aim override: while aimPos is set, the tool's scripts see the egg as the mouse target
+local aimPos, aimPart
+local mouse = Players.LocalPlayer:GetMouse()
+if hookmetamethod and newcclosure and checkcaller then
+    local oldIndex
+    oldIndex = hookmetamethod(game, "__index", newcclosure(function(self, key)
+        if aimPos and self == mouse and not checkcaller() then
+            if key == "Hit" then return CFrame.new(aimPos) end
+            if key == "Target" then return aimPart end
+        end
+        return oldIndex(self, key)
+    end))
+end
+
+local function getPaintball(char)
+    local tool = char:FindFirstChild(PAINTBALL_NAME)
+    if tool and tool:IsA("Tool") then return tool end
+    local backpack = Players.LocalPlayer:FindFirstChildOfClass("Backpack")
+    tool = backpack and backpack:FindFirstChild(PAINTBALL_NAME)
+    if tool and tool:IsA("Tool") then return tool end
+    return nil
+end
+
+local eggsRunning = false
+
+MainTab:CreateButton({
+    Name = "Paintball Eggs 1-10 (2008)",
+    Callback = function()
+        if eggsRunning then return end
+
+        local char = Players.LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+        if not (root and humanoid) then
+            Rayfield:Notify({
+                Title = "No character",
+                Content = "HumanoidRootPart or Humanoid not found.",
+                Duration = 4,
+            })
+            return
+        end
+
+        if not getPaintball(char) then
+            Rayfield:Notify({
+                Title = "Tool not found",
+                Content = PAINTBALL_NAME .. " isn't equipped or in your backpack.",
+                Duration = 5,
+            })
+            return
+        end
+
+        local camera = workspace.CurrentCamera
+        local oldCameraType = camera.CameraType
+        local oldMouseBehavior = UserInputService.MouseBehavior
+        local currentEgg = 0
+        local lastShot = 0
+
+        eggsRunning = true
+        if ANCHOR_DURING_EGGS then root.Anchored = true end
+
+        local ok, err = pcall(function()
+            for i = 1, EGG_COUNT do
+                currentEgg = i
+                assert(root.Parent and humanoid.Health > 0, "character died or respawned")
+
+                local name = string.format(EGG_NAME_FORMAT, i)
+                local egg = workspace:FindFirstChild(name, true)
+
+                if egg and egg:IsA("PVInstance") then
+                    -- Real center of the egg (bounding box for models, position for parts)
+                    local eggPos = egg:IsA("Model") and egg:GetBoundingBox().Position or egg:GetPivot().Position
+
+                    -- Tween next to the egg, facing it
+                    local standPos = eggPos + EGG_STAND_OFFSET
+                    local lookAt = Vector3.new(eggPos.X, standPos.Y, eggPos.Z)
+                    local distance = (root.Position - standPos).Magnitude
+                    local time = math.max(distance / TWEEN_SPEED, 0.3)
+                    local tween = TweenService:Create(
+                        root,
+                        TweenInfo.new(time, Enum.EasingStyle.Linear),
+                        {CFrame = CFrame.lookAt(standPos, lookAt)}
+                    )
+                    tween:Play()
+                    task.wait(time + 0.1) -- timed wait so a dead character can't hang the loop
+                    assert(root.Parent and humanoid.Health > 0, "character died or respawned")
+
+                    -- Re-find the tool each time (the game may replace it) and make sure it's equipped
+                    local tool = getPaintball(char)
+                    assert(tool, PAINTBALL_NAME .. " disappeared")
+                    if tool.Parent ~= char then
+                        humanoid:EquipTool(tool)
+                        task.wait(0.3)
+                    end
+
+                    -- Aim at the egg: point the camera at it (mouse locked to center)
+                    -- and make the mouse report the egg as its target
+                    local camPos = standPos + Vector3.new(0, 1, 0) + (eggPos - standPos).Unit * 1.5
+                    camera.CameraType = Enum.CameraType.Scriptable
+                    UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+                    camera.CFrame = CFrame.lookAt(camPos, eggPos)
+                    aimPos = eggPos
+                    aimPart = egg:IsA("BasePart") and egg or egg:FindFirstChildWhichIsA("BasePart", true)
+                    task.wait(0.15)
+
+                    -- Shoot, waiting out the tool's cooldown first
+                    for _ = 1, SHOTS_PER_EGG do
+                        local remaining = SHOT_COOLDOWN - (os.clock() - lastShot)
+                        if remaining > 0 then task.wait(remaining) end
+                        tool:Activate()
+                        lastShot = os.clock()
+                        task.wait(SHOOT_DELAY)
+                    end
+                else
+                    Rayfield:Notify({
+                        Title = "Egg missing",
+                        Content = name .. " not found, skipping.",
+                        Duration = 3,
+                    })
+                end
+            end
+        end)
+
+        -- Always give control back
+        eggsRunning = false
+        aimPos, aimPart = nil, nil
+        camera.CameraType = oldCameraType
+        UserInputService.MouseBehavior = oldMouseBehavior
+        if ANCHOR_DURING_EGGS and root.Parent then root.Anchored = false end
+
+        if not ok then
+            Rayfield:Notify({
+                Title = "Eggs stopped at Egg" .. currentEgg,
+                Content = tostring(err),
+                Duration = 8,
+            })
+        end
+    end,
+})
+
+-- Three-stop route: tween to each position, then fire that stop's ProximityPrompt
+local ANCHOR_DURING_STEPS = true -- holds you still between stops so you can't fall
+
+local STOP_STEPS = {
+    {
+        pos = Vector3.new(-2717.8427734375, -0.3234017491340637, 144.2500762939453),
+        prompt = function()
+            return workspace["-2718.00_-2.50_144.31"].Part.ProximityPrompt
+        end,
+    },
+    {
+        pos = Vector3.new(-2875.948486328125, 41.87655258178711, 434.8072814941406),
+        prompt = function()
+            return workspace["-2876.28_39.70_434.75"].Part.ProximityPrompt
+        end,
+    },
+    {
+        pos = Vector3.new(-2920.235107421875, 12.476578712463379, 249.28457641601562),
+        prompt = function()
+            local container = workspace["-2920.39_10.30_249.14"]
+            -- Try the 6th child first; if that isn't it, use the first prompt inside the object
+            local ok, prompt = pcall(function()
+                return container:GetChildren()[6].ProximityPrompt
+            end)
+            if ok and prompt then return prompt end
+            return container:FindFirstChildWhichIsA("ProximityPrompt", true)
+        end,
+    },
+    {
+        pos = Vector3.new(-2713.783203125, 15.100022315979004, 340.9212341308594),
+        prompt = function()
+            return workspace.Gimmicks.Island5.Podium.Part.ProximityPrompt
+        end,
+    },
+}
+
+local stopsRunning = false
+
+MainTab:CreateButton({
+    Name = "Tween + Fire Prompts (3 Stops)",
+    Callback = function()
+        if stopsRunning then return end
+
+        local char = Players.LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+        if not (root and humanoid) then
+            Rayfield:Notify({
+                Title = "No character",
+                Content = "HumanoidRootPart or Humanoid not found.",
+                Duration = 4,
+            })
+            return
+        end
+
+        stopsRunning = true
+        if ANCHOR_DURING_STEPS then root.Anchored = true end
+        local currentStop = 0
+
+        local ok, err = pcall(function()
+            for i, step in ipairs(STOP_STEPS) do
+                currentStop = i
+                assert(root.Parent and humanoid.Health > 0, "character died or respawned")
+
+                -- Tween to this stop
+                local distance = (root.Position - step.pos).Magnitude
+                local time = math.max(distance / TWEEN_SPEED, 0.3)
+                local tween = TweenService:Create(
+                    root,
+                    TweenInfo.new(time, Enum.EasingStyle.Linear),
+                    {CFrame = CFrame.new(step.pos)}
+                )
+                tween:Play()
+                task.wait(time + 0.1) -- timed wait so a dead character can't hang the loop
+                assert(root.Parent and humanoid.Health > 0, "character died or respawned")
+                task.wait(PROMPT_DELAY)
+
+                -- Fire this stop's ProximityPrompt, if it has one
+                if step.prompt then
+                    local fired, fireErr = pcall(function()
+                        local prompt = step.prompt()
+                        assert(prompt, "ProximityPrompt not found")
+                        fireproximityprompt(prompt)
+                    end)
+                    if not fired then
+                        Rayfield:Notify({
+                            Title = "Prompt " .. i .. " failed",
+                            Content = tostring(fireErr),
+                            Duration = 5,
+                        })
+                    end
+                end
+            end
+        end)
+
+        stopsRunning = false
+        if ANCHOR_DURING_STEPS and root.Parent then root.Anchored = false end
+
+        if not ok then
+            Rayfield:Notify({
+                Title = "Stopped at stop " .. currentStop,
+                Content = tostring(err),
+                Duration = 6,
+            })
+        end
+    end,
+})
+
+SecretTab:CreateButton({
+    Name = "Secret UGC Get (2006)",
+    Callback = function()
+        -- 1) Fire the ProximityPrompt
+        local ok, err = pcall(function()
+            local prompt = workspace:GetChildren()[295].Trees.Billboard:GetChildren()[3].ProximityPrompt
+            fireproximityprompt(prompt)
+        end)
+        if not ok then
+            Rayfield:Notify({
+                Title = "Prompt failed",
+                Content = tostring(err),
+                Duration = 5,
+            })
+        end
+        -- 2) Then run the Fire All Touch Interests script
+        local ok2, err2 = pcall(function()
+            loadstring(game:HttpGet("https://rawscripts.net/raw/Universal-Script-Fire-all-Touch-Interests-60782"))()
+        end)
+        if not ok2 then
+            Rayfield:Notify({
+                Title = "Script failed",
+                Content = tostring(err2),
+                Duration = 5,
+            })
+        end
+    end,
+})
