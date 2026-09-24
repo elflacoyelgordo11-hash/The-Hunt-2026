@@ -335,7 +335,7 @@ local STOP_STEPS = {
 local stopsRunning = false
 
 MainTab:CreateButton({
-    Name = "Tween + Fire Prompts (3 Stops)",
+    Name = "Get Pizza and Put In Place(2010)",
     Callback = function()
         if stopsRunning then return end
 
